@@ -1,0 +1,15 @@
+langchain==0.3.15
+langchain-anthropic==0.3.13
+langchain-huggingface==0.1.2
+langchain-community==0.3.15
+faiss-cpu==1.13.0
+pypdf==5.1.0
+sentence-transformers
+fastapi==0.115.6
+uvicorn==0.34.0
+streamlit==1.41.1
+python-dotenv==1.0.1
+requests==2.32.3
+numpy
+betterdb-semantic-cache
+botocore
