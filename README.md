@@ -1,4 +1,5 @@
 Note: Master Branch code changes have HuggingFace Embeddings and Claude as LLM
+      feature/litellm-gateway code changes using LiteLLM gateway, as gateway can connect to any LLM and embeddings 
       
 
 # Symposium RAG Bot
