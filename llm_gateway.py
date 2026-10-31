@@ -46,7 +46,7 @@ def get_embeddings() -> OpenAIEmbeddings:
     )
 
 
-def get_llm(temperature: float = 0.7, max_tokens: int = 1024) -> ChatOpenAI:
+def get_llm(temperature: float = 1.0, max_tokens: int = 1024) -> ChatOpenAI:
     """Chat client that calls the gateway's /v1/chat/completions route."""
     return ChatOpenAI(
         model=LLM_MODEL,
