@@ -1,3 +1,6 @@
+Note: Master Branch code changes have HuggingFace Embeddings and Claude as LLM
+      
+
 # Symposium RAG Bot
 
 A simple Retrieval-Augmented Generation (RAG) chatbot built with Python, FastAPI, and Streamlit.
