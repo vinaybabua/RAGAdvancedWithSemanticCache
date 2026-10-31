@@ -113,7 +113,7 @@ if vector_store.index.d != embedding_dimensions:
         "Rebuild the index by running `python phase1_ingestion/ingest.py`."
     )
 print("✅ Vector store loaded")
-llm = get_llm(temperature=0.7, max_tokens=1024)
+llm = get_llm(max_tokens=1024)
 print(f"✅ LLM client ready (gateway model alias={LLM_MODEL!r})")
 
 
