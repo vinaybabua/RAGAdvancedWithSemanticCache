@@ -6,11 +6,11 @@ This script demonstrates the result of the embedding process by showing:
 3. Vector dimensions and properties
 """
 
-import os
 import numpy as np
 from dotenv import load_dotenv
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+
+from llm_gateway import EMBEDDING_MODEL, LITELLM_BASE_URL, get_embeddings
 
 # Load environment variables
 load_dotenv()
@@ -24,13 +24,10 @@ print("=" * 80)
 # ============================================================================
 print("\n[Step 1] Loading vector store...")
 
-embeddings = HuggingFaceEmbeddings(
-    model_name=os.getenv(
-        "HF_EMBEDDING_MODEL",
-        "sentence-transformers/all-MiniLM-L6-v2",
-    ),
-    model_kwargs={"device": os.getenv("HF_DEVICE", "cpu")},
-)
+# Query embeddings are created by the LiteLLM gateway (same model alias
+# that was used during ingestion).
+embeddings = get_embeddings()
+print(f"Using gateway {LITELLM_BASE_URL} with embedding model alias {EMBEDDING_MODEL!r}")
 vector_store = FAISS.load_local(
     "vector_store",
     embeddings,

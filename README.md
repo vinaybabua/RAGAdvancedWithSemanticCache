@@ -1,159 +1,153 @@
-Note: Master Branch code changes have HuggingFace Embeddings and Claude as LLM
-      
+# Symposium RAG Bot — LiteLLM Gateway Edition
 
-# Symposium RAG Bot
-
-A simple Retrieval-Augmented Generation (RAG) chatbot built with Python, FastAPI, and Streamlit.
-
-## Project Structure
+The same RAG + semantic-cache chatbot as `RAG_Semantic_Cache_Symposium_Bot`, but **every LLM and embedding call now goes through a LiteLLM gateway** (an OpenAI-compatible proxy) instead of calling Anthropic and Hugging Face directly.
 
 ```
-Symposium_Bot/
-├── data/
-│   └── symposium.pdf              # Source document
-├── vector_store/                   # FAISS index (created after ingestion)
-├── phase1_ingestion/
-│   └── ingest.py                  # Data ingestion script
+Streamlit ──► FastAPI backend ──► BetterDB semantic cache (Valkey)
+                    │
+                    ├─ embeddings ─┐
+                    └─ chat ───────┤
+                                   ▼
+                         LiteLLM Gateway :4000
+                    ┌──────────────┴──────────────┐
+          "hf-embeddings" alias           "claude-chat" alias
+     HF Inference API (all-MiniLM-L6-v2)   Anthropic claude-sonnet-4-5
+```
+
+## What changed vs. the original project
+
+| | Original | This project |
+|---|---|---|
+| Embeddings | `HuggingFaceEmbeddings` (local sentence-transformers, torch) | `OpenAIEmbeddings` → gateway alias `hf-embeddings` |
+| LLM | `ChatAnthropic` | `ChatOpenAI` → gateway alias `claude-chat` |
+| Provider keys | In the app's `.env` | Only on the gateway |
+| Swapping models | Code change | Edit `gateway/litellm_config.yaml` |
+| Dependencies | `langchain-anthropic`, `langchain-huggingface`, `sentence-transformers` | `langchain-openai` (no torch needed) |
+
+New / changed files:
+
+- `llm_gateway.py` — one place that builds the gateway chat + embedding clients
+- `gateway/litellm_config.yaml` — gateway model aliases, provider keys, alternatives
+- `phase1_ingestion/ingest.py`, `phase2_retrieval/backend.py`, `demo_embeddings.py` — use `llm_gateway.py`
+- `scripts/test_gateway.py` — smoke test for the gateway
+- `/health` now also reports `litellm_gateway: true/false`
+- The LLM call is now `await llm.ainvoke(...)` so it doesn't block the async server
+
+Unchanged: frontend, chunking, FAISS, BetterDB semantic cache, Valkey / ElastiCache IAM auth.
+
+## Project structure
+
+```
+RAG_Semantic_Cache_Symposium_Bot_LiteLLM/
+├── data/symposium.pdf
+├── gateway/litellm_config.yaml     # LiteLLM gateway config
+├── llm_gateway.py                  # Gateway clients used by the app
+├── phase1_ingestion/ingest.py
 ├── phase2_retrieval/
-│   ├── backend.py                 # FastAPI backend (with semantic cache)
-│   └── frontend.py                # Streamlit UI (with cache hit badge)
-├── .env                           # Claude API key + Valkey config
-├── requirements.txt               # Dependencies
-└── README.md                      # This file
+│   ├── backend.py
+│   └── frontend.py
+├── scripts/test_gateway.py
+├── demo_embeddings.py
+├── requirements.txt                # App
+├── requirements-gateway.txt        # LiteLLM proxy (separate venv)
+└── .env.example
 ```
 
-## Setup Instructions
+## Setup (Windows)
 
-### 1. Install Dependencies
+### 1. Create `.env`
 
-```bash
+```powershell
+copy .env.example .env
+```
+
+Generate a gateway key (LiteLLM **refuses to start** with weak keys like `sk-1234`):
+
+```powershell
+python -c "import secrets; print('sk-' + secrets.token_hex(32))"
+```
+
+Put that value in **both** `LITELLM_MASTER_KEY` and `LITELLM_API_KEY`, then fill in:
+
+- `ANTHROPIC_API_KEY` — your Claude key
+- `HF_TOKEN` — a Hugging Face access token (read) from https://huggingface.co/settings/tokens
+
+### 2. Install the app
+
+```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-### 2. Configure Environment Variables
+### 3. Start the LiteLLM gateway (Terminal 1)
 
-Edit the `.env` file and add your Anthropic API key and Valkey connection details:
+**Option A — pip (own venv, keeps proxy deps separate from the app):**
 
-```
-ANTHROPIC_API_KEY=your-anthropic-api-key
-CLAUDE_MODEL=claude-sonnet-4-5
-HF_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
-HF_DEVICE=cpu
-SEMANTIC_CACHE_NAME=betterdbscache_hf
-
-# Valkey connection (semantic cache backend)
-VALKEY_HOST=localhost
-VALKEY_PORT=6379
+```powershell
+python -m venv .venv-gateway
+.\.venv-gateway\Scripts\python.exe -m pip install -r requirements-gateway.txt
+.\.venv-gateway\Scripts\litellm.exe --config gateway\litellm_config.yaml --port 4000
 ```
 
-Hugging Face embeddings run locally and do not need an API key. The model is downloaded the first time ingestion or the backend runs.
+LiteLLM reads the keys from your environment. If they aren't picked up, load `.env` first, e.g. in PowerShell:
 
-### 3. Start Valkey (Semantic Cache Backend)
-
-Run Valkey with the bundled search module using Docker (required for semantic caching):
-
-```bash
-docker run -d \
-  --name valkey-semantic-cache \
-  -p 6379:6379 \
-  valkey/valkey-bundle:latest
+```powershell
+Get-Content .env | Where-Object { $_ -match '^\s*[^#].*=' } | ForEach-Object { $k,$v = $_ -split '=',2; Set-Item "env:$($k.Trim())" $v.Trim() }
 ```
 
-Verify it's ready:
-```bash
-docker exec -it valkey-semantic-cache valkey-cli FT._LIST
-# Should return: (empty array)
+**Option B — Docker:**
+
+```powershell
+docker run -d --name litellm-gateway -p 4000:4000 --env-file .env `
+  -v ${PWD}\gateway\litellm_config.yaml:/app/config.yaml `
+  ghcr.io/berriai/litellm:main-stable --config /app/config.yaml --port 4000
 ```
 
-To stop/start later:
-```bash
-docker stop valkey-semantic-cache
-docker start valkey-semantic-cache
+Check it: http://localhost:4000/health/liveliness → `"I'm alive!"`
+
+### 4. Start Valkey (same as before)
+
+```powershell
+docker run -d --name valkey-semantic-cache -p 6379:6379 valkey/valkey-bundle:latest
 ```
 
-### 4. Run Phase 1: Data Ingestion
+### 5. Test the gateway
 
-This step needs to be run only once to create the vector store:
+```powershell
+.\.venv\Scripts\python.exe scripts\test_gateway.py
+```
 
-```bash
+You should see 384-dimensional vectors and a reply from Claude.
+
+### 6. Ingest (required — the old `vector_store/` isn't reused)
+
+```powershell
 .\.venv\Scripts\python.exe phase1_ingestion\ingest.py
 ```
 
-**What it does:**
-- Loads the PDF from `data/symposium.pdf`
-- Chunks it into 1000-character pieces
-- Creates local embeddings using the configured Hugging Face sentence-transformers model
-- Stores vectors in `vector_store/` folder
+### 7. Run backend and frontend
 
-If you already have a FAISS store created with OpenAI embeddings, rerun ingestion after this provider change. The embedding dimensions differ, so the old index cannot be used with the new model. The new `SEMANTIC_CACHE_NAME` keeps BetterDB from reusing incompatible OpenAI embedding vectors already stored in Valkey.
-
-### 5. Run Phase 2: Backend + Frontend
-
-**Terminal 1 - Start Backend API** (from project root):
-
-```bash
+```powershell
+# Terminal 2
 .\.venv\Scripts\python.exe -m uvicorn phase2_retrieval.backend:app --reload
-```
-
-Backend will run on: http://localhost:8000
-
-**Terminal 2 - Start Streamlit Frontend:**
-
-```bash
+# Terminal 3
 .\.venv\Scripts\python.exe -m streamlit run phase2_retrieval\frontend.py
 ```
 
-Frontend will open in your browser automatically (usually http://localhost:8501)
+## Swapping models
 
-## How It Works
+Edit `gateway/litellm_config.yaml` and restart the gateway — no app code changes.
 
-1. **User asks a question** in the Streamlit chat interface
-2. **Frontend sends question** to FastAPI backend
-3. **Backend checks the semantic cache** (Valkey via BetterDB)
-   - **Cache hit:** Returns the stored answer instantly — no LLM call, no cost
-   - **Cache miss:** Continues to retrieval + generation
-4. **Backend performs semantic search** to find top 3 relevant PDF chunks
-5. **Backend calls Claude** with the context and question
-6. **Response is stored in the cache** for future similar questions
-7. **Response is displayed** in the chat interface — with a `⚡ Cached` badge if served from cache
+- **Chat:** change `model: anthropic/claude-sonnet-4-5` (e.g. `anthropic/claude-haiku-4-5`, `openai/gpt-4o`, `bedrock/...`). Update `CACHE_COST_MODEL` in `.env` so cost-saving stats stay accurate.
+- **Embeddings:** the config includes ready-to-uncomment alternatives — local Hugging Face TEI (same model, no token), OpenAI, Ollama. **After changing the embedding model, re-run ingestion and use a new `SEMANTIC_CACHE_NAME`** — vectors from different models can't be mixed.
 
-### Semantic Cache — Why It Matters
+### Why the embedding config looks unusual
 
-Standard caching only catches exact matches. The semantic cache catches **paraphrases**:
-
-| Question | Result |
-|---|---|
-| "What is the event date?" | CACHE MISS → calls LLM |
-| "What is the event date?" (repeated) | CACHE HIT — exact match |
-| "When does the event take place?" | CACHE HIT — paraphrase detected |
-
-The backend prints real-time cache stats after every request:
-```
-[CACHE MISS] "What is the event date?"
-[STATS]      total=1 | hits=0 | misses=1 | hit_rate=0.0% | saved=$0.0000
-
-[CACHE HIT]  similarity=0.9700  "When does the event take place?"
-[STATS]      total=2 | hits=1 | misses=1 | hit_rate=50.0% | saved=$0.0008
-```
-
-A `/stats` endpoint is also available at `http://localhost:8000/stats` for a full summary.
-
-## Technology Stack
-
-- **PDF Processing**: PyPDFLoader
-- **Chunking**: RecursiveCharacterTextSplitter (1000 chars, 200 overlap)
-- **Embeddings**: Local Hugging Face sentence-transformers model
-- **Vector Store**: FAISS (local)
-- **LLM**: Anthropic Claude
-- **Semantic Cache**: BetterDB (`betterdb-semantic-cache`) backed by Valkey
-- **Cache Store**: Valkey with valkey-search module (`valkey/valkey-bundle` Docker image)
-- **Backend**: FastAPI (async)
-- **Frontend**: Streamlit
+LiteLLM treats any Hugging Face model whose name contains `sentence-transformers` as a *sentence-similarity* request and returns similarity scores instead of vectors. The config works around this by giving the model a name without that prefix, pointing `api_base` at the real model's feature-extraction endpoint, and setting `input_type: feature-extraction`. `scripts/test_gateway.py` checks that you are getting real vectors.
 
 ## Notes
 
-- Semantic cache threshold is set to `0.15` (cosine distance) — questions within 85% similarity return a cache hit
-- Cache stats (hit rate, cost saved) are printed in the backend terminal after every request and available at `GET /stats`
-- The Valkey Docker container must be running before starting the backend
-"# RAGAdvancedWithSemanticCache" 
+- Semantic cache threshold: `0.15` cosine distance (unchanged)
+- `SEMANTIC_CACHE_NAME` defaults to `betterdbscache_litellm` so it never mixes with the original project's cache entries
+- `/stats` and the console stats work as before
+- Gateway extras you can enable later in `litellm_config.yaml`: fallbacks, retries, virtual keys with budgets, spend tracking, rate limits

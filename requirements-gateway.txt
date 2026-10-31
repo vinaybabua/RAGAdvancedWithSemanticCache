@@ -1,0 +1,3 @@
+# LiteLLM gateway (proxy server). Install in its OWN virtual environment,
+# or run the Docker image instead (see README.md).
+litellm[proxy]

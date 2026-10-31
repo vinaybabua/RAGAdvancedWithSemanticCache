@@ -1,16 +1,21 @@
 """
 Phase 2: Backend API with BetterDB Semantic Caching
+
+All LLM and embedding calls go through the LiteLLM gateway
+(see llm_gateway.py and gateway/litellm_config.yaml).
+
+Run from the project root:
+    python -m uvicorn phase2_retrieval.backend:app --reload
 """
 
-import asyncio
 import os
+import sys
 from contextlib import asynccontextmanager
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from langchain_anthropic import ChatAnthropic
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 import valkey.asyncio as valkey_async
@@ -22,13 +27,22 @@ from botocore.model import ServiceId
 from botocore.signers import RequestSigner
 from valkey.credentials import CredentialProvider
 
+# Make the project root importable (llm_gateway.py lives there).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from llm_gateway import (  # noqa: E402
+    EMBEDDING_MODEL,
+    LITELLM_API_KEY,
+    LITELLM_BASE_URL,
+    LLM_MODEL,
+    get_embeddings,
+    get_llm,
+)
+
 load_dotenv()
 
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5")
-HF_EMBEDDING_MODEL = os.getenv(
-    "HF_EMBEDDING_MODEL",
-    "sentence-transformers/all-MiniLM-L6-v2",
-)
+# The gateway alias (e.g. "claude-chat") is not a name BetterDB's cost table
+# knows, so cost-savings tracking uses the real underlying model name.
+CACHE_COST_MODEL = os.getenv("CACHE_COST_MODEL", "claude-sonnet-4-5")
 
 # ============================================================================
 # IAM AUTH TOKEN GENERATION (for AWS ElastiCache Serverless public endpoints)
@@ -81,14 +95,11 @@ class ElastiCacheIAMCredentialProvider(CredentialProvider):
 
 
 # ============================================================================
-# VECTOR STORE + LLM  (synchronous, loaded once at import time)
+# VECTOR STORE + LLM  (loaded once at import time, both via LiteLLM gateway)
 # ============================================================================
 
-print("Loading vector store...")
-embeddings = HuggingFaceEmbeddings(
-    model_name=HF_EMBEDDING_MODEL,
-    model_kwargs={"device": os.getenv("HF_DEVICE", "cpu")},
-)
+print(f"Loading vector store (embeddings via LiteLLM gateway @ {LITELLM_BASE_URL})...")
+embeddings = get_embeddings()
 vector_store = FAISS.load_local(
     "vector_store",
     embeddings,
@@ -98,15 +109,17 @@ embedding_dimensions = len(embeddings.embed_query("embedding dimension check"))
 if vector_store.index.d != embedding_dimensions:
     raise RuntimeError(
         f"The FAISS index has {vector_store.index.d} dimensions, but "
-        f"{HF_EMBEDDING_MODEL!r} produces {embedding_dimensions}. "
+        f"gateway model {EMBEDDING_MODEL!r} produces {embedding_dimensions}. "
         "Rebuild the index by running `python phase1_ingestion/ingest.py`."
     )
 print("✅ Vector store loaded")
-llm = ChatAnthropic(model=CLAUDE_MODEL, temperature=0.7, max_tokens=1024)
+llm = get_llm(temperature=0.7, max_tokens=1024)
+print(f"✅ LLM client ready (gateway model alias={LLM_MODEL!r})")
 
 
 async def embed_cache_question(text: str) -> list[float]:
-    return await asyncio.to_thread(embeddings.embed_query, text)
+    # Same gateway embedding model as the vector store, called asynchronously.
+    return await embeddings.aembed_query(text)
 
 
 # ============================================================================
@@ -166,7 +179,16 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/health")
 async def health():
     pong = await _valkey_client.ping()
-    return {"status": "ok", "valkey_ping": pong}
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(
+                f"{LITELLM_BASE_URL.removesuffix('/v1')}/health/liveliness",
+                headers={"Authorization": f"Bearer {LITELLM_API_KEY}"},
+            )
+        gateway_ok = r.status_code == 200
+    except httpx.HTTPError:
+        gateway_ok = False
+    return {"status": "ok", "valkey_ping": pong, "litellm_gateway": gateway_ok}
 
 app.add_middleware(
     CORSMiddleware,
@@ -241,7 +263,7 @@ async def chat(request: ChatRequest):
         ("user", "{question}"),
     ])
     prompt = prompt_template.format_messages(context=context, question=request.question)
-    response = llm.invoke(prompt)
+    response = await llm.ainvoke(prompt)
     answer = response.content
 
     # 4. Store response in cache with token counts for cost tracking
@@ -251,7 +273,7 @@ async def chat(request: ChatRequest):
         request.question,
         answer,
         CacheStoreOptions(
-            model=CLAUDE_MODEL,
+            model=CACHE_COST_MODEL,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
         ),

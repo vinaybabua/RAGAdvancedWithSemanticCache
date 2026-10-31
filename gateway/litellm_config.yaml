@@ -1,0 +1,89 @@
+# ============================================================================
+# LiteLLM Gateway (Proxy) configuration
+# ----------------------------------------------------------------------------
+# The app only calls the aliases below ("claude-chat", "hf-embeddings").
+# Change what sits behind an alias here; no Python code changes needed.
+#
+# Start it (from the project root):
+#   litellm --config gateway/litellm_config.yaml --port 4000
+# or with Docker -- see README.md.
+#
+# Provider keys are read from environment variables (os.environ/...), so they
+# live only on the gateway, never in the app.
+# ============================================================================
+
+model_list:
+
+  # --------------------------------------------------------------------------
+  # CHAT MODEL  (used by phase2_retrieval/backend.py)
+  # --------------------------------------------------------------------------
+  - model_name: claude-chat
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # Example fallback / alternative -- uncomment and point LLM_MODEL at it,
+  # or keep it as a fallback (see router_settings below).
+  # - model_name: claude-chat-fast
+  #   litellm_params:
+  #     model: anthropic/claude-haiku-4-5
+  #     api_key: os.environ/ANTHROPIC_API_KEY
+
+  # --------------------------------------------------------------------------
+  # EMBEDDING MODEL  (used by ingestion, backend retrieval AND semantic cache)
+  # --------------------------------------------------------------------------
+  # Same model as the original project: sentence-transformers/all-MiniLM-L6-v2
+  # (384 dims), served by the Hugging Face Inference API. Needs HF_TOKEN.
+  #
+  # Why the odd-looking settings:
+  #   * LiteLLM sends any model whose name contains "sentence-transformers" as
+  #     a sentence-SIMILARITY request (returns scores, not vectors). So the
+  #     `model` name below leaves that prefix out, and `api_base` points at
+  #     the real model's feature-extraction endpoint instead.
+  #   * input_type: feature-extraction stops LiteLLM from looking up the
+  #     model's pipeline tag (which is "sentence-similarity" for this model).
+  - model_name: hf-embeddings
+    litellm_params:
+      model: huggingface/all-MiniLM-L6-v2
+      api_base: https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2/pipeline/feature-extraction
+      api_key: os.environ/HF_TOKEN
+      input_type: feature-extraction
+    model_info:
+      mode: embedding
+
+  # ---- Alternatives (pick one, give it model_name: hf-embeddings, and
+  # ---- re-run ingestion -- vectors from different models are not compatible)
+  #
+  # A) Same model, fully local, no HF token: run Hugging Face TEI in Docker
+  #      docker run -d --name tei -p 8080:80 ghcr.io/huggingface/text-embeddings-inference:cpu-1.5 --model-id sentence-transformers/all-MiniLM-L6-v2
+  #    (use http://host.docker.internal:8080/v1 if LiteLLM itself runs in Docker)
+  # - model_name: hf-embeddings
+  #   litellm_params:
+  #     model: openai/sentence-transformers/all-MiniLM-L6-v2
+  #     api_base: http://localhost:8080/v1
+  #     api_key: "not-needed"
+  #   model_info:
+  #     mode: embedding
+  #
+  # B) OpenAI embeddings (1536 dims)
+  # - model_name: hf-embeddings
+  #   litellm_params:
+  #     model: openai/text-embedding-3-small
+  #     api_key: os.environ/OPENAI_API_KEY
+  #
+  # C) Ollama (local)
+  # - model_name: hf-embeddings
+  #   litellm_params:
+  #     model: ollama/nomic-embed-text
+  #     api_base: http://localhost:11434
+
+litellm_settings:
+  drop_params: true          # silently drop params a provider doesn't support
+  request_timeout: 120
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY   # the app sends this as LITELLM_API_KEY
+
+# router_settings:
+#   fallbacks: [{"claude-chat": ["claude-chat-fast"]}]
+#   num_retries: 2
